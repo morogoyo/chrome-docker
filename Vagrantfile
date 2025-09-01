@@ -1,5 +1,4 @@
-
-# Load .env file manually (no gem required)
+# Load environment variables from .env file (manually)
 env_file = File.join(File.dirname(__FILE__), '.env')
 if File.exist?(env_file)
   File.readlines(env_file).each do |line|
@@ -9,15 +8,14 @@ if File.exist?(env_file)
   end
 end
 
-
-
+# Vagrant configuration starts here
 Vagrant.configure("2") do |config|
+
   config.vm.box = "bento/ubuntu-22.04"
 
-   # Use environment variable for synced folder
-    host_folder = ENV['HOST_SHARED_FOLDER']
-    host_folder_ansible = ENV['HOST_SHARED_FOLDER_ANSIBLE']
-
+  # Optional ENV-based paths
+  host_folder = ENV['HOST_SHARED_FOLDER']
+  host_folder_ansible = ENV['HOST_SHARED_FOLDER_ANSIBLE']
 
   config.vm.provider "virtualbox" do |vb|
     vb.memory = "4096"
@@ -25,61 +23,67 @@ Vagrant.configure("2") do |config|
     vb.gui = true
   end
 
-  ################## Shared folder from host (Windows) to guest (VM) #############################
-#   config.vm.synced_folder host_folder, "/vagrant_data"
+  config.vm.boot_timeout = 1800
 
-  config.vm.synced_folder host_folder_ansible, "/ansible"
+  config.vm.provision "shell", inline: <<-SHELL
+    echo "******************** / System Prep / ********************"
+    sudo apt-get update -y
+    sudo apt-get install -y python3 apt-transport-https ca-certificates curl software-properties-common gnupg lsb-release net-tools openssh-server git
 
+    echo "******************** / Docker Installation / ********************"
+    curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] \
+      https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | \
+      sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
 
+    sudo apt-get update -y
+    sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
+    sudo systemctl enable docker
+    sudo systemctl start docker
 
+    echo "******************** / Create ansible user / ********************"
+    sudo groupadd -f docker
+    sudo useradd -m -s /bin/bash ansible || true
+    echo "ansible ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/ansible
+    sudo usermod -aG docker ansible
 
-  config.vm.boot_timeout = 900  # 15 minutes
-  config.vm.network "public_network" , type: "dhcp"
+    echo "******************** / Prepare SSH folder / ********************"
+    sudo mkdir -p /home/ansible/.ssh
+    sudo chown -R ansible:ansible /home/ansible/.ssh
+    sudo chmod 700 /home/ansible/.ssh
 
+    echo "******************** / Generate SSH key for internal communication / ********************"
+    sudo -u ansible bash -c '
+      KEY_PATH="/home/ansible/.ssh/id_rsa_ansible"
+      if [ ! -f "$KEY_PATH" ]; then
+        ssh-keygen -t rsa -b 4096 -C "ansible@vagrant" -f "$KEY_PATH" -N ""
+        chmod 600 "$KEY_PATH"
+        chmod 644 "$KEY_PATH.pub"
+        echo "✅ SSH key created."
+        echo "🔑 Public key (use this for remote nodes or GitHub if needed):"
+        cat "$KEY_PATH.pub"
+      fi
+    '
 
-  # Shell provisioner that reads .env inside the guest VM
-#   config.vm.provision "shell", inline: <<-SHELL
-#     echo "******************** / system update / ********************"
-#     sudo apt-get update -y
-#     sudo apt-get upgrade -y
-#
-#     echo "******************** / Install required packages for Docker setup / ********************"
-#     sudo apt-get install -y python3 apt-transport-https ca-certificates curl software-properties-common gnupg lsb-release
-#
-#     echo "******************** / Add Docker GPG and repo / ********************"
-#     curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
-#
-#     echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] \
-#     https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | \
-#     sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
-#
-#     echo "******************** / Install Docker Engine and Compose / ********************"
-#     sudo apt-get update -y
-#     sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
-#
-#     echo "******************** / Start and enable Docker / ********************"
-#     sudo systemctl enable docker
-#     sudo systemctl start docker
-#
-#     echo "******************** / Add vagrant user to Docker group / ********************"
-#     sudo usermod -aG docker vagrant
-#
-#     echo "******************** / Source Docker credentials from .env / ********************"
-#     if [ -f /vagrant/.env ]; then
-#       export $(grep DOCKER_USERNAME /vagrant/.env | xargs)
-#       export $(grep DOCKER_PASSWORD /vagrant/.env | xargs)
-#       echo "$DOCKER_PASSWORD" | docker login -u "$DOCKER_USERNAME" --password-stdin
-#     else
-#       echo "/vagrant/.env not found. Skipping Docker login."
-#     fi
-#
-#     echo "******************** / Docker Info / ********************"
-#     docker --version
-#     docker compose version || echo "Docker Compose plugin installed"
-#
-# echo "******************** / pull Docker containers  / ********************"
-#     docker pull morogoyo/ansible:dev
-#     docker run -d --name ansible morogoyo/ansible:dev
-#
-#   SHELL
+    echo "******************** / Optional Docker Login from .env / ********************"
+    if [ -f /vagrant/.env ]; then
+      export $(grep DOCKER_USERNAME /vagrant/.env | xargs)
+      export $(grep DOCKER_PASSWORD /vagrant/.env | xargs)
+      echo "$DOCKER_PASSWORD" | docker login -u "$DOCKER_USERNAME" --password-stdin
+    else
+      echo "/vagrant/.env not found. Skipping Docker login."
+    fi
+
+    echo "******************** / Pull and Run Ansible Docker Container / ********************"
+    docker pull morogoyo/ansible:dev
+    docker run -d --name ansible \
+      -u ansible \
+      -v /home/ansible/.ssh:/home/ansible/.ssh:ro \
+      morogoyo/ansible:dev
+
+  SHELL
+
+  # Optional synced folders for Ansible project or shared code
+  config.vm.synced_folder "e:/development/devops", "/home/ansible/devops"
+
 end
